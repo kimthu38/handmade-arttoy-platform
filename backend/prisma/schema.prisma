@@ -1,0 +1,354 @@
+// This is your Prisma schema file
+// Learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  buyer
+  vendor
+  admin
+}
+
+enum OrderStatus {
+  awaiting_confirmation
+  ready_to_ship
+  shipping
+  delivered
+  cancelled
+}
+
+enum PaymentMethod {
+  cod
+  vnpay
+  momo
+}
+
+enum PaymentStatus {
+  pending
+  paid
+  failed
+  refunded
+}
+
+enum ApplicationStatus {
+  pending
+  approved
+  rejected
+}
+
+enum WithdrawalStatus {
+  pending
+  approved
+  rejected
+}
+
+enum DisputeStatus {
+  open
+  under_review
+  resolved
+  closed
+}
+
+// ─── USER & IDENTITY ─────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  password_hash String?
+  full_name     String
+  avatar_url    String?
+  role          Role      @default(buyer)
+  // OAuth provider fields
+  provider      String?   // 'local' | 'google' | 'facebook'
+  provider_id   String?
+  is_active     Boolean   @default(true)
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  addresses     Address[]
+  shop          Shop?
+  cart_items    CartItem[]
+  orders        Order[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Address {
+  id          String   @id @default(uuid())
+  user_id     String
+  label       String   @default("Home") // 'Home' | 'Work' | etc.
+  full_name   String
+  phone       String
+  street      String
+  ward        String?
+  district    String
+  city        String
+  is_default  Boolean  @default(false)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  user        User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("addresses")
+}
+
+// ─── VENDOR & SHOP ───────────────────────────────────────────────────────────
+
+model VendorApplication {
+  id                String            @id @default(uuid())
+  user_id           String
+  business_name     String
+  description       String?
+  portfolio_urls    String[]
+  process_video_url String?
+  status            ApplicationStatus @default(pending)
+  admin_note        String?
+  reviewed_at       DateTime?
+  created_at        DateTime          @default(now())
+  updated_at        DateTime          @updatedAt
+
+  @@index([user_id, status])
+  @@map("vendor_applications")
+}
+
+model Shop {
+  id                String    @id @default(uuid())
+  vendor_id         String    @unique
+  name              String
+  slug              String    @unique
+  description       String?
+  logo_url          String?
+  brand_story       String?
+  process_video_url String?
+  is_approved       Boolean   @default(false)
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  vendor            User      @relation(fields: [vendor_id], references: [id])
+  products          Product[]
+  sub_orders        SubOrder[]
+  wallet            Wallet?
+
+  @@index([slug])
+  @@map("shops")
+}
+
+// ─── CATALOG ─────────────────────────────────────────────────────────────────
+
+model Category {
+  id         String     @id @default(uuid())
+  name       String     @unique
+  slug       String     @unique
+  parent_id  String?
+  created_at DateTime   @default(now())
+
+  parent     Category?  @relation("CategoryTree", fields: [parent_id], references: [id])
+  children   Category[] @relation("CategoryTree")
+  products   Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id              String    @id @default(uuid())
+  shop_id         String
+  category_id     String?
+  name            String
+  slug            String    @unique
+  description     String?
+  price           Decimal   @db.Decimal(15, 2)
+  stock           Int       @default(0)
+  images          String[]
+  video_url       String?
+  materials       String[]
+  // Domain-specific fields (info.md requirement)
+  is_preorder     Boolean   @default(false)
+  estimated_days  Int?      // Meaningful only when is_preorder = true
+  allow_custom    Boolean   @default(false)
+  // Status
+  is_active       Boolean   @default(true)
+  is_moderated    Boolean   @default(false) // Admin must approve before going live
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  shop            Shop      @relation(fields: [shop_id], references: [id])
+  category        Category? @relation(fields: [category_id], references: [id])
+  cart_items      CartItem[]
+  order_items     OrderItem[]
+
+  @@index([shop_id])
+  @@index([category_id])
+  @@index([is_active, is_moderated])
+  @@map("products")
+}
+
+// ─── CART ────────────────────────────────────────────────────────────────────
+
+model CartItem {
+  id           String   @id @default(uuid())
+  user_id      String
+  product_id   String
+  quantity     Int      @default(1)
+  custom_note  String?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  user         User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  product      Product  @relation(fields: [product_id], references: [id])
+
+  @@unique([user_id, product_id])
+  @@map("cart_items")
+}
+
+// ─── ORDER (Multi-vendor split) ───────────────────────────────────────────────
+
+model Order {
+  id               String        @id @default(uuid())
+  buyer_id         String
+  total_amount     Decimal       @db.Decimal(15, 2)
+  payment_method   PaymentMethod
+  payment_status   PaymentStatus @default(pending)
+  payment_ref      String?       // Gateway transaction reference
+  shipping_address Json          // Snapshot of address at checkout time
+  created_at       DateTime      @default(now())
+  updated_at       DateTime      @updatedAt
+
+  buyer            User          @relation(fields: [buyer_id], references: [id])
+  sub_orders       SubOrder[]
+
+  @@index([buyer_id])
+  @@map("orders")
+}
+
+model SubOrder {
+  id              String      @id @default(uuid())
+  order_id        String
+  shop_id         String
+  subtotal        Decimal     @db.Decimal(15, 2)
+  shipping_fee    Decimal     @db.Decimal(15, 2) @default(0)
+  commission      Decimal     @db.Decimal(15, 2) @default(0)
+  status          OrderStatus @default(awaiting_confirmation)
+  tracking_number String?
+  shipped_at      DateTime?
+  delivered_at    DateTime?
+  created_at      DateTime    @default(now())
+  updated_at      DateTime    @updatedAt
+
+  order           Order       @relation(fields: [order_id], references: [id])
+  shop            Shop        @relation(fields: [shop_id], references: [id])
+  items           OrderItem[]
+  disputes        Dispute[]
+
+  @@index([order_id])
+  @@index([shop_id])
+  @@map("sub_orders")
+}
+
+model OrderItem {
+  id            String   @id @default(uuid())
+  sub_order_id  String
+  product_id    String
+  product_name  String   // Snapshot at purchase time
+  unit_price    Decimal  @db.Decimal(15, 2)
+  quantity      Int
+  custom_note   String?
+  created_at    DateTime @default(now())
+
+  sub_order     SubOrder @relation(fields: [sub_order_id], references: [id])
+  product       Product  @relation(fields: [product_id], references: [id])
+
+  @@map("order_items")
+}
+
+// ─── FINANCE & WALLET ─────────────────────────────────────────────────────────
+
+model Wallet {
+  id              String               @id @default(uuid())
+  shop_id         String               @unique
+  balance         Decimal              @db.Decimal(15, 2) @default(0)
+  locked_balance  Decimal              @db.Decimal(15, 2) @default(0) // Escrow hold
+  created_at      DateTime             @default(now())
+  updated_at      DateTime             @updatedAt
+
+  shop            Shop                 @relation(fields: [shop_id], references: [id])
+  transactions    WalletTransaction[]
+  withdrawal_requests WithdrawalRequest[]
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id          String   @id @default(uuid())
+  wallet_id   String
+  amount      Decimal  @db.Decimal(15, 2)
+  type        String   // 'credit' | 'debit' | 'lock' | 'unlock'
+  reference   String?  // sub_order_id or withdrawal_request_id
+  description String?
+  created_at  DateTime @default(now())
+
+  wallet      Wallet   @relation(fields: [wallet_id], references: [id])
+
+  @@index([wallet_id])
+  @@map("wallet_transactions")
+}
+
+model WithdrawalRequest {
+  id          String           @id @default(uuid())
+  wallet_id   String
+  amount      Decimal          @db.Decimal(15, 2)
+  bank_info   Json             // { bank_name, account_number, account_name }
+  status      WithdrawalStatus @default(pending)
+  admin_note  String?
+  reviewed_at DateTime?
+  created_at  DateTime         @default(now())
+  updated_at  DateTime         @updatedAt
+
+  wallet      Wallet           @relation(fields: [wallet_id], references: [id])
+
+  @@index([wallet_id, status])
+  @@map("withdrawal_requests")
+}
+
+// ─── PLATFORM CONFIG ──────────────────────────────────────────────────────────
+
+model CommissionConfig {
+  id             String   @id @default(uuid())
+  rate           Decimal  @db.Decimal(6, 4) // e.g., 0.0500 = 5%
+  effective_from DateTime @default(now())
+  created_by     String   // admin user_id
+  created_at     DateTime @default(now())
+
+  @@map("commission_configs")
+}
+
+// ─── DISPUTE RESOLUTION ───────────────────────────────────────────────────────
+
+model Dispute {
+  id            String        @id @default(uuid())
+  sub_order_id  String
+  buyer_id      String
+  reason        String
+  evidence_urls String[]
+  status        DisputeStatus @default(open)
+  resolution    String?
+  admin_id      String?
+  resolved_at   DateTime?
+  created_at    DateTime      @default(now())
+  updated_at    DateTime      @updatedAt
+
+  sub_order     SubOrder      @relation(fields: [sub_order_id], references: [id])
+
+  @@index([sub_order_id, status])
+  @@map("disputes")
+}
