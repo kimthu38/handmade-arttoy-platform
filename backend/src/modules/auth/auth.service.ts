@@ -19,7 +19,7 @@ interface OAuthUserPayload {
   avatar_url?: string;
 }
 
-interface AuthResult {
+export interface AuthResult {
   access_token: string;
   user: Omit<User, 'password_hash'>;
 }
